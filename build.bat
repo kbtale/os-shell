@@ -1,44 +1,64 @@
 @echo off
 echo Building OS Shell...
 
-REM Create build directory if it doesn't exist
-if not exist build mkdir build
+:: Set paths to tools
+set NASM=nasm
+set LD=ld
+set OBJCOPY=objcopy
+set QEMU=qemu-system-x86_64
 
-REM Compile bootloader
+:: Set build directories
+set BUILD_DIR=build
+set SRC_DIR=src
+set OUTPUT_DIR=output
+
+:: Create build directories if they don't exist
+if not exist %BUILD_DIR% mkdir %BUILD_DIR%
+if not exist %OUTPUT_DIR% mkdir %OUTPUT_DIR%
+
+:: Compile bootloader
 echo Compiling bootloader...
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\bootloader.o src\bootloader\bootloader.asm
+%NASM% -f elf64 %SRC_DIR%\bootloader\bootloader.asm -o %BUILD_DIR%\bootloader.o
 
-REM Compile kernel components
-echo Compiling kernel components...
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\kernel.o src\kernel\kernel.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\console.o src\kernel\console.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\memory.o src\kernel\memory.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\interrupt.o src\kernel\interrupt.asm
+:: Compile kernel
+echo Compiling kernel...
+%NASM% -f elf64 %SRC_DIR%\kernel\kernel.asm -o %BUILD_DIR%\kernel.o
 
-REM Compile shell
+:: Compile memory management
+echo Compiling memory management...
+%NASM% -f elf64 %SRC_DIR%\kernel\memory.asm -o %BUILD_DIR%\memory.o
+
+:: Compile console
+echo Compiling console...
+%NASM% -f elf64 %SRC_DIR%\console\console.asm -o %BUILD_DIR%\console.o
+
+:: Compile interrupt handling
+echo Compiling interrupt handling...
+%NASM% -f elf64 %SRC_DIR%\kernel\interrupt.asm -o %BUILD_DIR%\interrupt.o
+
+:: Compile shell
 echo Compiling shell...
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\shell.o src\shell\shell.asm
+%NASM% -f elf64 %SRC_DIR%\shell\shell.asm -o %BUILD_DIR%\shell.o
 
-REM Compile library modules
-echo Compiling library modules...
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\drivers.o src\lib\drivers.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\filesystem.o src\lib\filesystem.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\process.o src\lib\process.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\sysinfo.o src\lib\sysinfo.asm
-tools\nasm\nasm-2.16.01\nasm.exe -f win64 -o build\utils.o src\lib\utils.asm
+:: Compile process management
+echo Compiling process management...
+%NASM% -f elf64 %SRC_DIR%\lib\process.asm -o %BUILD_DIR%\process.o
 
-REM Link bootloader
-echo Linking bootloader...
-tools\mingw\mingw64\bin\ld.exe -m i386pep -T linker.ld -nostdlib -o build\bootloader.exe build\bootloader.o
-tools\mingw\mingw64\bin\objcopy.exe -O binary build\bootloader.exe build\bootloader.bin
+:: Link everything together
+echo Linking...
+%LD% -T linker.ld -o %BUILD_DIR%\kernel.elf %BUILD_DIR%\bootloader.o %BUILD_DIR%\kernel.o %BUILD_DIR%\memory.o %BUILD_DIR%\console.o %BUILD_DIR%\interrupt.o %BUILD_DIR%\shell.o %BUILD_DIR%\process.o
 
-REM Link kernel and other components
-echo Linking kernel and components...
-tools\mingw\mingw64\bin\ld.exe -m i386pep -T linker.ld -nostdlib -o build\kernel.exe build\kernel.o build\console.o build\memory.o build\interrupt.o build\shell.o build\drivers.o build\filesystem.o build\process.o build\sysinfo.o build\utils.o
-tools\mingw\mingw64\bin\objcopy.exe -O binary build\kernel.exe build\kernel.bin
+:: Create bootable disk image
+echo Creating bootable disk image...
+%OBJCOPY% -O binary %BUILD_DIR%\kernel.elf %OUTPUT_DIR%\os-shell.bin
 
-REM Create disk image
-echo Creating disk image...
-copy /b build\bootloader.bin+build\kernel.bin build\os.img
+:: Create ISO image (if you have mkisofs or genisoimage)
+:: echo Creating ISO image...
+:: mkisofs -R -b os-shell.bin -no-emul-boot -boot-load-size 4 -o %OUTPUT_DIR%\os-shell.iso %OUTPUT_DIR%
 
 echo Build completed!
+echo.
+echo To run the OS in QEMU, use: %QEMU% -kernel %OUTPUT_DIR%\os-shell.bin
+
+:: Uncomment to automatically run after build
+:: %QEMU% -kernel %OUTPUT_DIR%\os-shell.bin

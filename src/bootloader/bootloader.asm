@@ -26,11 +26,38 @@ stack_bottom:
     resb 16384 ; 16 KiB stack
 stack_top:
 
+; Page tables for long mode
+align 4096
+pml4_table:
+    resb 4096
+pdpt_table:
+    resb 4096
+pd_table:
+    resb 4096
+pt_table:
+    resb 4096
+
+section .data
+align 8
+gdt64:
+    dq 0                         ; Null descriptor
+.code: equ $ - gdt64
+    dq (1 << 43) | (1 << 44) | (1 << 47) | (1 << 53) ; Code segment
+.data: equ $ - gdt64
+    dq (1 << 44) | (1 << 47)     ; Data segment
+.pointer:
+    dw $ - gdt64 - 1             ; Size
+    dq gdt64                     ; Address
+
 section .text
 global _start
+extern kernel_main
 
 ; Entry point
 _start:
+    ; Save multiboot info pointer
+    mov edi, ebx
+    
     ; Set up stack
     mov esp, stack_top
     
@@ -38,34 +65,58 @@ _start:
     push 0
     popf
     
-    ; Save multiboot info pointer (in ebx)
-    push ebx
-    
-    ; Check for multiboot2 compliance
-    cmp eax, 0x36D76289
-    jne .no_multiboot
-    
     ; Check for CPUID support
-    call check_cpuid
-    test eax, eax
-    jz .no_cpuid
+    pushfd
+    pop eax
+    mov ecx, eax
+    xor eax, 1 << 21
+    push eax
+    popfd
+    pushfd
+    pop eax
+    push ecx
+    popfd
+    xor eax, ecx
+    jz no_cpuid
     
     ; Check for long mode support
-    call check_long_mode
-    test eax, eax
-    jz .no_long_mode
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb no_long_mode
     
-    ; Set up paging for long mode
-    call setup_paging
+    mov eax, 0x80000001
+    cpuid
+    test edx, 1 << 29
+    jz no_long_mode
     
-    ; Load GDT for long mode
-    lgdt [gdt64.pointer]
+    ; Set up page tables
+    ; PML4
+    mov eax, pdpt_table
+    or eax, 0b11    ; Present, writable
+    mov [pml4_table], eax
     
-    ; Update selectors
-    mov ax, gdt64.data
-    mov ss, ax
-    mov ds, ax
-    mov es, ax
+    ; PDPT
+    mov eax, pd_table
+    or eax, 0b11    ; Present, writable
+    mov [pdpt_table], eax
+    
+    ; PD - identity map first 2MB
+    mov eax, pt_table
+    or eax, 0b11    ; Present, writable
+    mov [pd_table], eax
+    
+    ; PT - map 512 pages (2MB)
+    mov ecx, 0
+.map_pt_loop:
+    mov eax, 0x1000    ; 4KB page
+    mul ecx
+    or eax, 0b11       ; Present, writable
+    mov [pt_table + ecx * 8], eax
+    
+    inc ecx
+    cmp ecx, 512
+    jne .map_pt_loop
     
     ; Enable PAE
     mov eax, cr4
@@ -78,206 +129,91 @@ _start:
     or eax, 1 << 8
     wrmsr
     
-    ; Enable paging (this activates long mode)
+    ; Load PML4 address to CR3
+    mov eax, pml4_table
+    mov cr3, eax
+    
+    ; Enable paging
     mov eax, cr0
     or eax, 1 << 31
     mov cr0, eax
     
-    ; Jump to 64-bit code
+    ; Load GDT
+    lgdt [gdt64.pointer]
+    
+    ; Jump to long mode
     jmp gdt64.code:long_mode_start
-    
-.no_multiboot:
-    ; Print error message
-    mov esi, no_multiboot_msg
-    call print_string
-    jmp halt
-    
-.no_cpuid:
-    ; Print error message
-    mov esi, no_cpuid_msg
-    call print_string
-    jmp halt
-    
-.no_long_mode:
-    ; Print error message
-    mov esi, no_long_mode_msg
-    call print_string
-    jmp halt
 
-; Function to check CPUID support
-check_cpuid:
-    ; Try to flip the ID bit in EFLAGS
-    pushfd
-    pop eax
-    mov ecx, eax
-    xor eax, 1 << 21
-    push eax
-    popfd
-    pushfd
-    pop eax
-    push ecx
-    popfd
-    
-    ; Compare with original value
-    xor eax, ecx
-    jz .no_cpuid
-    
-    ; CPUID is supported
-    mov eax, 1
-    ret
-    
-.no_cpuid:
-    ; CPUID not supported
-    xor eax, eax
-    ret
+; Error handlers
+no_cpuid:
+    mov al, "1"
+    jmp error
 
-; Function to check long mode support
-check_long_mode:
-    ; Check if CPUID supports extended functions
-    mov eax, 0x80000000
-    cpuid
-    cmp eax, 0x80000001
-    jb .no_long_mode
-    
-    ; Check for long mode
-    mov eax, 0x80000001
-    cpuid
-    test edx, 1 << 29
-    jz .no_long_mode
-    
-    ; Long mode is supported
-    mov eax, 1
-    ret
-    
-.no_long_mode:
-    ; Long mode not supported
-    xor eax, eax
-    ret
+no_long_mode:
+    mov al, "2"
+    jmp error
 
-; Function to set up paging for long mode
-setup_paging:
-    ; Clear page tables
-    mov edi, 0x1000
-    mov cr3, edi
-    xor eax, eax
-    mov ecx, 4096
-    rep stosd
-    mov edi, cr3
-    
-    ; Set up page tables
-    mov dword [edi], 0x2003      ; PML4T[0] -> PDPT
-    add edi, 0x1000
-    mov dword [edi], 0x3003      ; PDPT[0] -> PDT
-    add edi, 0x1000
-    mov dword [edi], 0x4003      ; PDT[0] -> PT
-    add edi, 0x1000
-    
-    ; Identity map the first 2 MB
-    mov ebx, 0x00000003
-    mov ecx, 512
-    
-.set_entry:
-    mov dword [edi], ebx
-    add ebx, 0x1000
-    add edi, 8
-    loop .set_entry
-    
-    ret
+error:
+    ; Print "ERR: X" where X is the error code
+    mov dword [0xb8000], 0x4f524f45
+    mov dword [0xb8004], 0x4f3a4f52
+    mov dword [0xb8008], 0x4f204f20
+    mov byte  [0xb800a], al
+    hlt
 
-; Function to print a null-terminated string
-; Input: ESI = pointer to string
-print_string:
-    push eax
-    push ebx
-    
-    mov ah, 0x0E        ; BIOS teletype function
-    mov bh, 0           ; Page number
-    
-.loop:
-    lodsb               ; Load next character
-    test al, al         ; Check for null terminator
-    jz .done
-    int 0x10            ; Call BIOS
-    jmp .loop
-    
-.done:
-    pop ebx
-    pop eax
-    ret
-
-; Halt the system
-halt:
-    cli                 ; Disable interrupts
-    hlt                 ; Halt the CPU
-    jmp halt            ; Just in case
-
-; 64-bit code
 [BITS 64]
 long_mode_start:
-    ; Clear all segment registers
-    xor ax, ax
+    ; Set up segment registers
+    mov ax, gdt64.data
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
     mov ss, ax
     
-    ; Restore multiboot info pointer
-    pop rdi
+    ; Clear screen
+    mov rax, 0x0F200F200F200F20  ; White on black spaces
+    mov rdi, 0xb8000
+    mov rcx, 500                 ; 4000 bytes / 8 bytes per quad word = 500 quad words
+    rep stosq
     
     ; Print welcome message
+    mov rdi, 0xb8000
     mov rsi, welcome_msg
-    call print_string_64
+    call print_string
     
-    ; Jump to kernel
-    extern kernel_main
+    ; Call kernel main
     call kernel_main
     
-    ; If kernel returns, halt the system
-    jmp halt64
+    ; If kernel returns, halt
+    cli
+    hlt
 
-; Function to print a null-terminated string in 64-bit mode
-; Input: RSI = pointer to string
-print_string_64:
+; Function to print a null-terminated string
+; rdi = screen address, rsi = string address
+print_string:
     push rax
-    push rdx
+    push rcx
+    push rsi
+    push rdi
     
+    mov ah, 0x0F    ; White on black
 .loop:
-    lodsb               ; Load next character
-    test al, al         ; Check for null terminator
+    lodsb           ; Load next character
+    test al, al     ; Check for null terminator
     jz .done
     
-    ; Write to VGA text buffer
-    mov ah, 0x0F        ; White on black
-    mov [0xB8000 + rdx], ax
-    add rdx, 2
+    mov [rdi], ax   ; Store character and attribute
+    add rdi, 2      ; Move to next character position
+    
     jmp .loop
     
 .done:
-    pop rdx
+    pop rdi
+    pop rsi
+    pop rcx
     pop rax
     ret
 
-; Halt the system in 64-bit mode
-halt64:
-    cli                 ; Disable interrupts
-    hlt                 ; Halt the CPU
-    jmp halt64          ; Just in case
-
-; GDT for long mode
 section .rodata
-gdt64:
-    dq 0                                                ; Null descriptor
-.code: equ $ - gdt64
-    dq (1 << 43) | (1 << 44) | (1 << 47) | (1 << 53)   ; Code segment
-.data: equ $ - gdt64
-    dq (1 << 44) | (1 << 47) | (1 << 41)               ; Data segment
-.pointer:
-    dw $ - gdt64 - 1    ; Size
-    dq gdt64            ; Address
-
-; Messages
-no_multiboot_msg db 'Error: Not booted with multiboot-compliant bootloader', 0
-no_cpuid_msg db 'Error: CPUID not supported', 0
-no_long_mode_msg db 'Error: Long mode not supported', 0
-welcome_msg db 'Welcome to x86-64 OS Shell!', 0
+welcome_msg db "OS Shell - 64-bit mode initialized", 0
