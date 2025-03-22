@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+*.o
+*.bin
+*.elf
+*.img
+
+# Tools and dependencies
+tools/mingw/
+tools/nasm/
+qemu-installer.exe
+mingw.zip
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
